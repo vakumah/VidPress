@@ -2,44 +2,53 @@ import streamlit as st
 import ffmpeg
 import os
 import tempfile
-import shutil
+import time
 
 # --- Konfigurasi Halaman ---
-st.set_page_config(page_title="Ultra Compressor Engine", layout="centered")
+st.set_page_config(page_title="Ultra Compressor WA Native", layout="centered")
 
-st.title("🔥 Ultra Video Compressor")
-st.markdown("""
-    Engine ini menggunakan algoritma **H.265 (HEVC)** dengan metode **CRF** untuk memeras ukuran file sekecil mungkin tanpa merusak detail visual secara brutal.
-""")
+st.title("🟢 WhatsApp Native Compressor")
+st.caption("Menggunakan Codec H.264 agar tidak dikompres ulang (membengkak) oleh WhatsApp.")
 
 # --- Fungsi Engine Kompresi ---
-def compress_video(input_path, output_path, crf_value, preset_speed, remove_audio):
-    """
-    Core Logic: Menggunakan FFmpeg untuk kompresi cerdas.
-    """
+def compress_video(input_path, output_path, crf_value, preset_speed, remove_audio, target_res):
     try:
         # Input stream
         stream = ffmpeg.input(input_path)
         
-        # Audio settings
+        # Audio Settings
         if remove_audio:
-            audio_settings = {'an': None} # Hapus audio total
+            audio_settings = {'an': None}
         else:
-            # Kompres audio ke AAC 64k mono (sangat hemat tapi suara jelas)
+            # AAC LC adalah standar WA. Mono 64k cukup.
             audio_settings = {'c:a': 'aac', 'b:a': '64k', 'ac': 1}
 
-        # Video stream dengan H.265
+        # Video Settings (KUNCI RAHASIANYA DI SINI)
+        video_settings = {
+            'vcodec': 'libx264',    # GANTI KE H.264 (WA Friendly)
+            'crf': crf_value,       # 23-28 adalah sweet spot H.264
+            'preset': preset_speed, 
+            'pix_fmt': 'yuv420p',   # WA Wajib YUV420P
+            'movflags': '+faststart',
+            'profile:v': 'main',    # Profile aman
+            'level': '3.1'          # Level kompatibilitas HP lama
+        }
+
+        # Resize Logic (Opsional, tapi membantu agar tidak resize otomatis)
+        # Jika user memilih 720p, kita paksa scale. -2 artinya "ikut rasio aspek"
+        if target_res == "720p":
+            stream = ffmpeg.filter(stream, 'scale', 'trunc(oh*a/2)*2', 720)
+        elif target_res == "480p":
+            stream = ffmpeg.filter(stream, 'scale', 'trunc(oh*a/2)*2', 480)
+
         stream = ffmpeg.output(
             stream, 
             output_path,
             **audio_settings,
-            vcodec='libx265',      # Codec H.265 (Super Hemat)
-            crf=crf_value,         # Kualitas (Lower = Bagus, Higher = Jelek/Kecil)
-            preset=preset_speed,   # Speed (Slower = Lebih kecil & Bagus)
-            movflags='+faststart'  # Agar video langsung play (web optimized)
+            **video_settings
         )
         
-        # Jalankan command (overwrite yes)
+        # Jalankan
         ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
         return True, None
         
@@ -47,75 +56,49 @@ def compress_video(input_path, output_path, crf_value, preset_speed, remove_audi
         return False, e.stderr.decode('utf8')
 
 # --- UI Interface ---
-
-uploaded_file = st.file_uploader("Upload Video (MP4/MOV/MKV)", type=["mp4", "mov", "mkv", "avi"])
+uploaded_file = st.file_uploader("Upload Video", type=["mp4", "mov", "mkv"])
 
 if uploaded_file is not None:
-    # Simpan file upload ke temp
-    tfile = tempfile.NamedTemporaryFile(delete=False) 
+    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") 
     tfile.write(uploaded_file.read())
     input_video_path = tfile.name
 
-    # Tampilkan info file asli
     original_size = os.path.getsize(input_video_path) / (1024 * 1024)
     st.info(f"📁 Ukuran Asli: {original_size:.2f} MB")
 
-    # --- Pengaturan Advanced (Engine Control) ---
-    with st.expander("⚙️ Pengaturan Engine (Advanced)", expanded=True):
-        col1, col2 = st.columns(2)
+    with st.expander("⚙️ Pengaturan WA", expanded=True):
+        # CRF H.264 beda dengan H.265.
+        # Range aman: 23 (Bening) - 30 (Burik). Default 26.
+        crf = st.slider("Level Kompresi (CRF)", 20, 35, 26, help="Makin tinggi = Makin kecil & buram. 26-28 recommended.") 
         
-        with col1:
-            # CRF 28 adalah sweet spot (kecil banget tapi masih layak tonton di HP)
-            # Rentang: 18 (Bagus) - 28 (Default) - 35 (Burik tapi super kecil)
-            crf = st.slider("Level Kompresi (CRF)", 18, 40, 28, help="Makin besar angka, makin kecil file (tapi kualitas turun). 28-30 disarankan untuk WA.")
+        speed = st.select_slider("Speed", options=["ultrafast", "fast", "medium", "slow", "veryslow"], value="medium")
         
-        with col2:
-            # Preset 'veryslow' bikin file paling kecil tapi proses lama
-            speed = st.select_slider("Mode Proses", options=["medium", "slow", "veryslow"], value="medium", help="Veryslow = File paling kecil & kualitas terbaik, tapi nunggunya lama.")
+        # Pilihan Resolusi (PENTING)
+        # Seringkali WA resize paksa kalau resolusi aneh (misal 1080p ke 720p).
+        # Mending kita resize duluan biar kontrol di tangan kita.
+        resolution = st.selectbox("Paksa Resolusi (Tinggi)", ["Original", "720p", "480p"], index=1, help="Pilih 720p agar pas dengan standar Status WA.")
+        
+        rm_audio = st.checkbox("Hapus Suara")
 
-        rm_audio = st.checkbox("Hapus Suara (Bisu)", help="Centang ini kalau mau ukuran ekstrim kecil (misal cuma video meme/cctv).")
-
-    # Tombol Eksekusi
-    if st.button("🚀 MULAI KOMPRESI"):
-        output_video_path = input_video_path + "_compressed.mp4"
+    if st.button("🚀 GAS KOMPRES"):
+        output_video_path = input_video_path + "_wa_ready.mp4"
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        status_text.text("Sedang memanaskan engine FFmpeg...")
-        
-        # Proses Kompresi
-        success, error_log = compress_video(input_video_path, output_video_path, crf, speed, rm_audio)
-        
-        progress_bar.progress(100)
+        with st.spinner('Memasak video agar disukai WhatsApp...'):
+            start_time = time.time()
+            success, error_log = compress_video(input_video_path, output_video_path, crf, speed, rm_audio, resolution)
+            end_time = time.time()
         
         if success:
             final_size = os.path.getsize(output_video_path) / (1024 * 1024)
             compression_ratio = ((original_size - final_size) / original_size) * 100
             
-            st.success("✅ Kompresi Selesai!")
+            st.success(f"✅ Selesai! Ukuran: {final_size:.2f} MB")
             
-            # Statistik
-            col_res1, col_res2, col_res3 = st.columns(3)
-            col_res1.metric("Ukuran Asli", f"{original_size:.2f} MB")
-            col_res2.metric("Hasil Kompresi", f"{final_size:.2f} MB")
-            col_res3.metric("Penghematan", f"{compression_ratio:.0f}%")
-            
-            # Video Player Hasil
             st.video(output_video_path)
             
-            # Tombol Download
             with open(output_video_path, "rb") as file:
-                btn = st.download_button(
-                    label="⬇️ Download Video Kecil",
-                    data=file,
-                    file_name="video_super_kecil.mp4",
-                    mime="video/mp4"
-                )
+                st.download_button("⬇️ Download (Format WA)", file, file_name="video_wa_fix.mp4")
         else:
-            st.error("❌ Terjadi Kesalahan pada Engine")
-            with st.expander("Lihat Log Error"):
-                st.code(error_log)
-
-        # Cleanup file temp
-        # (Opsional: di production sebaiknya pakai cronjob atau logic cleanup otomatis)
-        
+            st.error("❌ Error")
+            st.code(error_log)
+            
