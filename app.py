@@ -5,10 +5,10 @@ import tempfile
 import time
 
 # --- Konfigurasi Halaman ---
-st.set_page_config(page_title="Ultra WA V5 (Fake 4K)", layout="centered")
+st.set_page_config(page_title="Ultra WA V5.1 (Fix Error)", layout="centered")
 
-st.title("💎 WA Compressor V5: The Magician")
-st.caption("Fitur: Fake 4K (Sharpening) + Color Fix + Size Kecil")
+st.title("💎 WA Compressor V5.1: The Magician")
+st.caption("Fitur: Fake 4K (Sharpening) + Color Fix + Size Kecil + Syntax Fix")
 
 # --- Fungsi Engine Kompresi ---
 def compress_video(input_path, output_path, crf_value, preset_speed, remove_audio, target_res, crispy_mode):
@@ -28,9 +28,10 @@ def compress_video(input_path, output_path, crf_value, preset_speed, remove_audi
 
         # --- 3. MAGIC TRICK: UNSHARP MASK (Fake 4K) ---
         if crispy_mode:
-            # luma_msize_x:luma_msize_y:luma_amount:chroma_msize_x:chroma_msize_y:chroma_amount
-            # 5:5:1.0 artinya pertajam detail halus sebesar 100%
-            video_stream = ffmpeg.filter(video_stream, 'unsharp', '5:5:1.2:5:5:0.0')
+            # FIX ERROR DISINI:
+            # Kita pisah argumennya pakai koma, bukan string panjang.
+            # Format: luma_x, luma_y, luma_amt, chroma_x, chroma_y, chroma_amt
+            video_stream = ffmpeg.filter(video_stream, 'unsharp', 5, 5, 1.2, 5, 5, 0.0)
 
         # 4. Settingan Video
         video_settings = {
