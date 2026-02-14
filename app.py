@@ -1060,22 +1060,38 @@ body { background: transparent; overflow: hidden; font-family: 'Inter', sans-ser
 
     bg.onload = function() {
         syncSize();
-        var h = bg.offsetHeight + 30;
+        var h = bg.offsetHeight + 40;
         window.parent.postMessage({type:'streamlit:setFrameHeight', height: h}, '*');
     };
     window.addEventListener('resize', function() {
         syncSize();
-        var h = bg.offsetHeight + 30;
+        var h = bg.offsetHeight + 40;
         window.parent.postMessage({type:'streamlit:setFrameHeight', height: h}, '*');
     });
-    setTimeout(function(){ syncSize(); }, 200);
+    function delayedSync() {
+        syncSize();
+        if (bg.offsetHeight > 0) {
+            var h = bg.offsetHeight + 40;
+            window.parent.postMessage({type:'streamlit:setFrameHeight', height: h}, '*');
+        }
+    }
+    setTimeout(delayedSync, 200);
+    setTimeout(delayedSync, 600);
+    setTimeout(delayedSync, 1500);
+    if (window.ResizeObserver) {
+        new ResizeObserver(function() {
+            syncSize();
+            var h = bg.offsetHeight + 40;
+            window.parent.postMessage({type:'streamlit:setFrameHeight', height: h}, '*');
+        }).observe(bg);
+    }
 })();
 </script>
 </body>
 </html>"""
 
     html_final = html_code.replace("__BEFORE__", before_b64).replace("__AFTER__", after_b64)
-    components.html(html_final, height=500, scrolling=False)
+    components.html(html_final, height=800, scrolling=False)
 
 
 def render_before_after(input_path, output_path, original_size, uploaded_name, video_metadata, out_format="mp4"):
