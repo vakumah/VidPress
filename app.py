@@ -17,13 +17,19 @@ import math
 import subprocess
 import re
 import atexit
+import base64
+import json
+import time
+import uuid
 
-APP_VERSION = "6.0.0"
+APP_VERSION = "6.1.0"
 APP_TITLE = "Kompres"
 APP_TAGLINE = "Kompresi Video Profesional"
 
 SUPPORTED_FORMATS = ["mp4", "mov", "mkv", "avi", "webm"]
 FFMPEG_THREADS = 0
+SESSION_DIR = "/tmp/kompres_sessions"
+SESSION_MAX_AGE = 3600
 
 _temp_files = []
 
@@ -211,6 +217,17 @@ PAGE_STYLES = """
         font-size: 0.85rem;
     }
 
+    .section-title {
+        font-size: 0.85rem;
+        font-weight: 700;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin: 1.2rem 0 0.6rem;
+        padding-bottom: 0.4rem;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+    }
+
     .footer-section {
         text-align: center;
         padding: 2rem 0 1rem;
@@ -264,12 +281,6 @@ PAGE_STYLES = """
         transform: translateY(0);
     }
 
-    div[data-testid="stExpander"] {
-        border: 1px solid rgba(124, 58, 237, 0.12);
-        border-radius: 12px;
-        overflow: hidden;
-    }
-
     div[data-testid="stDownloadButton"] > button {
         width: 100%;
         background: linear-gradient(135deg, #059669, #047857);
@@ -287,36 +298,6 @@ PAGE_STYLES = """
         box-shadow: 0 8px 20px rgba(5, 150, 105, 0.4);
     }
 
-    .compare-label {
-        text-align: center;
-        font-size: 0.75rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        padding: 0.4rem 0;
-        border-radius: 6px;
-        margin-bottom: 0.4rem;
-    }
-
-    .compare-original {
-        background: rgba(239, 68, 68, 0.12);
-        color: #f87171;
-    }
-
-    .compare-compressed {
-        background: rgba(16, 185, 129, 0.12);
-        color: #34d399;
-    }
-
-    .feature-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.4rem;
-        padding: 0.5rem 0.8rem;
-        border-radius: 8px;
-        font-size: 0.82rem;
-        font-weight: 500;
-    }
 </style>
 """
 
@@ -346,16 +327,33 @@ def calculate_reduction(original, compressed):
 
 
 def get_clean_filename(uploaded_name):
-    """Menghasilkan nama file download yang bersih tanpa duplikat ekstensi."""
     p = pathlib.Path(uploaded_name)
-    name_without_ext = p.stem
-    return f"kompres_{name_without_ext}.mp4"
+    return "kompres_" + p.stem + ".mp4"
+
+
+def extract_frame(video_path, timestamp=1.0):
+    """Ambil satu frame dari video dan kembalikan sebagai base64 JPEG."""
+    try:
+        out_path = video_path + "_thumb.jpg"
+        _temp_files.append(out_path)
+        (
+            ffmpeg
+            .input(video_path, ss=timestamp)
+            .output(out_path, vframes=1, format="image2", **{"q:v": 2})
+            .overwrite_output()
+            .run(capture_stdout=True, capture_stderr=True)
+        )
+        if os.path.exists(out_path):
+            with open(out_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+    except Exception:
+        pass
+    return None
 
 
 def probe_video(file_path):
-    """Mendapatkan metadata video menggunakan ffprobe."""
     try:
-        info = ffmpeg.probe(file_path)
+        info = ffmpeg.probe(file_path, analyzeduration="5000000", probesize="5000000")
         video_stream = next(
             (s for s in info.get("streams", []) if s.get("codec_type") == "video"),
             None,
@@ -372,7 +370,7 @@ def probe_video(file_path):
             "duration": duration,
             "duration_text": format_duration(duration),
             "bitrate": bitrate,
-            "bitrate_text": f"{bitrate // 1000} kbps" if bitrate else "N/A",
+            "bitrate_text": (str(bitrate // 1000) + " kbps") if bitrate else "N/A",
             "has_audio": audio_stream is not None,
         }
 
@@ -413,10 +411,6 @@ def compress_video(
     progress_callback=None,
     duration_seconds=0,
 ):
-    """
-    Kompresi video dengan H.264 High Profile dan kalibrasi warna BT.709.
-    Mendukung trimming, FPS, crop, dan bitrate limiting.
-    """
     try:
         input_args = {}
         if trim_start is not None and trim_start > 0:
@@ -435,12 +429,7 @@ def compress_video(
             video = ffmpeg.filter(video, "scale", "trunc(iw/2)*2", "trunc(ih/2)*2")
 
         if aspect_ratio:
-            ratio_map = {
-                "16:9": "16/9",
-                "9:16": "9/16",
-                "1:1": "1",
-                "4:3": "4/3",
-            }
+            ratio_map = {"16:9": "16/9", "9:16": "9/16", "1:1": "1", "4:3": "4/3"}
             if aspect_ratio in ratio_map:
                 r = ratio_map[aspect_ratio]
                 video = ffmpeg.filter(
@@ -509,14 +498,76 @@ def compress_video(
         return False, error_detail
 
 
-def save_upload_to_temp(uploaded_file):
-    """Menyimpan file upload ke lokasi sementara."""
+def save_upload_to_temp(uploaded_file, token):
+    """Simpan file upload ke direktori sesi persisten dengan token unik."""
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    cleanup_old_sessions()
+
     suffix = pathlib.Path(uploaded_file.name).suffix or ".mp4"
-    temp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    _temp_files.append(temp.name)
-    temp.write(uploaded_file.getbuffer())
-    temp.close()
-    return temp.name
+    session_id = str(int(time.time() * 1000))
+    file_path = os.path.join(SESSION_DIR, session_id + suffix)
+    meta_path = os.path.join(SESSION_DIR, session_id + ".json")
+
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    meta = {
+        "original_name": uploaded_file.name,
+        "file_path": file_path,
+        "file_size": uploaded_file.size,
+        "timestamp": time.time(),
+        "session_id": session_id,
+        "token": token,
+    }
+    with open(meta_path, "w") as f:
+        json.dump(meta, f)
+
+    _temp_files.append(file_path)
+    _temp_files.append(meta_path)
+    return file_path
+
+
+def find_recent_session(token):
+    """Cari sesi upload terakhir yang cocok dengan token browser ini."""
+    if not os.path.isdir(SESSION_DIR):
+        return None
+    if not token:
+        return None
+    now = time.time()
+    best = None
+    for name in os.listdir(SESSION_DIR):
+        if not name.endswith(".json"):
+            continue
+        meta_path = os.path.join(SESSION_DIR, name)
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            if meta.get("token") != token:
+                continue
+            age = now - meta.get("timestamp", 0)
+            if age > SESSION_MAX_AGE:
+                continue
+            if not os.path.exists(meta.get("file_path", "")):
+                continue
+            if best is None or meta["timestamp"] > best["timestamp"]:
+                best = meta
+        except (json.JSONDecodeError, OSError):
+            continue
+    return best
+
+
+def cleanup_old_sessions():
+    """Hapus file sesi yang lebih dari 1 jam."""
+    if not os.path.isdir(SESSION_DIR):
+        return
+    now = time.time()
+    for name in os.listdir(SESSION_DIR):
+        full = os.path.join(SESSION_DIR, name)
+        try:
+            if now - os.path.getmtime(full) > SESSION_MAX_AGE:
+                os.unlink(full)
+        except OSError:
+            pass
 
 
 def cleanup_temp_files():
@@ -524,9 +575,6 @@ def cleanup_temp_files():
         try:
             if os.path.exists(path):
                 os.unlink(path)
-            compressed = path + "_out.mp4"
-            if os.path.exists(compressed):
-                os.unlink(compressed)
         except OSError:
             pass
     _temp_files.clear()
@@ -554,7 +602,6 @@ def render_header():
 
 
 def render_video_info(metadata):
-    """Menampilkan metadata video menggunakan komponen native Streamlit."""
     c1, c2, c3 = st.columns(3)
     c1.metric("Durasi", metadata.get("duration_text", "N/A"))
     c2.metric("Resolusi", metadata.get("resolution_text", "N/A"))
@@ -588,37 +635,38 @@ def render_compression_controls(preset, video_metadata):
     is_custom = preset["name"] == "Custom"
     settings = {}
 
-    with st.expander("Kompresi dan Kualitas", expanded=True):
-        if is_custom:
-            settings["crf"] = st.slider(
-                "Level Kompresi (CRF)",
-                min_value=18,
-                max_value=36,
-                value=preset["crf"],
-                help="Nilai lebih tinggi = file lebih kecil. 18-22 hampir lossless, 28-32 ukuran minimal.",
-            )
-            settings["preset"] = st.select_slider(
-                "Kecepatan Encoding",
-                options=SPEED_OPTIONS,
-                value=preset["preset"],
-                help="Encoding lambat menghasilkan kompresi lebih efisien.",
-            )
-            res_options = ["Resolusi Asli"] + list(RESOLUTION_MAP.keys())
-            res_index = 0
-            if preset["resolution"] in RESOLUTION_MAP:
-                res_index = list(RESOLUTION_MAP.keys()).index(preset["resolution"]) + 1
-            selected_res = st.selectbox("Resolusi Output", res_options, index=res_index)
-            settings["resolution"] = "original" if selected_res == "Resolusi Asli" else selected_res
-        else:
-            settings["crf"] = preset["crf"]
-            settings["preset"] = preset["preset"]
-            settings["resolution"] = preset["resolution"]
-            st.info(
-                "CRF: " + str(preset["crf"]) + " | Preset: " + preset["preset"] + " | "
-                "Resolusi: " + preset["resolution"]
-            )
+    st.markdown('<div class="section-title">Kompresi dan Kualitas</div>', unsafe_allow_html=True)
 
-        settings["mute_audio"] = st.checkbox("Nonaktifkan Audio")
+    if is_custom:
+        settings["crf"] = st.slider(
+            "Level Kompresi (CRF)",
+            min_value=18,
+            max_value=36,
+            value=preset["crf"],
+            help="Nilai lebih tinggi = file lebih kecil. 18-22 hampir lossless, 28-32 ukuran minimal.",
+        )
+        settings["preset"] = st.select_slider(
+            "Kecepatan Encoding",
+            options=SPEED_OPTIONS,
+            value=preset["preset"],
+            help="Encoding lambat menghasilkan kompresi lebih efisien.",
+        )
+        res_options = ["Resolusi Asli"] + list(RESOLUTION_MAP.keys())
+        res_index = 0
+        if preset["resolution"] in RESOLUTION_MAP:
+            res_index = list(RESOLUTION_MAP.keys()).index(preset["resolution"]) + 1
+        selected_res = st.selectbox("Resolusi Output", res_options, index=res_index)
+        settings["resolution"] = "original" if selected_res == "Resolusi Asli" else selected_res
+    else:
+        settings["crf"] = preset["crf"]
+        settings["preset"] = preset["preset"]
+        settings["resolution"] = preset["resolution"]
+        st.info(
+            "CRF: " + str(preset["crf"]) + " | Preset: " + preset["preset"]
+            + " | Resolusi: " + preset["resolution"]
+        )
+
+    settings["mute_audio"] = st.checkbox("Nonaktifkan Audio")
 
     return settings
 
@@ -626,66 +674,248 @@ def render_compression_controls(preset, video_metadata):
 def render_advanced_controls(preset, video_metadata):
     advanced = {}
 
-    with st.expander("Pengaturan Lanjutan"):
-        st.caption("POTONG VIDEO")
+    st.markdown('<div class="section-title">Pengaturan Lanjutan</div>', unsafe_allow_html=True)
 
-        max_duration = video_metadata.get("duration", 600) if video_metadata else 600
+    max_duration = video_metadata.get("duration", 600) if video_metadata else 600
 
-        col_start, col_end = st.columns(2)
-        with col_start:
-            trim_start = st.number_input(
-                "Mulai dari (detik)",
-                min_value=0.0,
-                max_value=float(max_duration),
-                value=0.0,
-                step=0.5,
-                format="%.1f",
-            )
-        with col_end:
-            trim_end = st.number_input(
-                "Sampai (detik)",
-                min_value=0.0,
-                max_value=float(max_duration),
-                value=0.0,
-                step=0.5,
-                format="%.1f",
-                help="Isi 0 untuk memproses sampai akhir video.",
-            )
+    col_start, col_end = st.columns(2)
+    with col_start:
+        trim_start = st.number_input(
+            "Potong mulai (detik)",
+            min_value=0.0,
+            max_value=float(max_duration),
+            value=0.0,
+            step=0.5,
+            format="%.1f",
+        )
+    with col_end:
+        trim_end = st.number_input(
+            "Potong sampai (detik)",
+            min_value=0.0,
+            max_value=float(max_duration),
+            value=0.0,
+            step=0.5,
+            format="%.1f",
+            help="Isi 0 untuk memproses sampai akhir video.",
+        )
 
-        advanced["trim_start"] = trim_start if trim_start > 0 else None
-        advanced["trim_end"] = trim_end if trim_end > 0 else None
+    advanced["trim_start"] = trim_start if trim_start > 0 else None
+    advanced["trim_end"] = trim_end if trim_end > 0 else None
 
-        st.caption("FRAME RATE DAN RASIO")
+    is_custom = preset["name"] == "Custom"
 
-        col_fps, col_ratio = st.columns(2)
+    col_fps, col_ratio = st.columns(2)
+    with col_fps:
+        if is_custom:
+            fps_label = st.selectbox("Frame Rate", list(FRAMERATE_OPTIONS.keys()), index=0)
+            advanced["target_fps"] = FRAMERATE_OPTIONS[fps_label]
+        else:
+            advanced["target_fps"] = preset.get("fps")
+            fps_display = str(preset["fps"]) + " FPS" if preset.get("fps") else "Bawaan"
+            st.text_input("Frame Rate", value=fps_display, disabled=True)
 
-        is_custom = preset["name"] == "Custom"
+    with col_ratio:
+        if is_custom:
+            aspect_label = st.selectbox("Aspect Ratio", list(ASPECT_RATIOS.keys()), index=0)
+            advanced["aspect_ratio"] = ASPECT_RATIOS[aspect_label]
+        else:
+            advanced["aspect_ratio"] = preset.get("aspect")
+            aspect_display = preset.get("aspect") or "Bawaan"
+            st.text_input("Aspect Ratio", value=aspect_display, disabled=True)
 
-        with col_fps:
-            if is_custom:
-                fps_label = st.selectbox("Frame Rate", list(FRAMERATE_OPTIONS.keys()), index=0)
-                advanced["target_fps"] = FRAMERATE_OPTIONS[fps_label]
-            else:
-                advanced["target_fps"] = preset.get("fps")
-                fps_display = str(preset["fps"]) + " FPS" if preset.get("fps") else "Bawaan"
-                st.text_input("Frame Rate", value=fps_display, disabled=True)
-
-        with col_ratio:
-            if is_custom:
-                aspect_label = st.selectbox("Aspect Ratio", list(ASPECT_RATIOS.keys()), index=0)
-                advanced["aspect_ratio"] = ASPECT_RATIOS[aspect_label]
-            else:
-                advanced["aspect_ratio"] = preset.get("aspect")
-                aspect_display = preset.get("aspect") or "Bawaan"
-                st.text_input("Aspect Ratio", value=aspect_display, disabled=True)
-
-        advanced["max_bitrate"] = preset.get("max_bitrate")
+    advanced["max_bitrate"] = preset.get("max_bitrate")
 
     return advanced
 
 
-def render_before_after(input_path, output_path, original_size, uploaded_name):
-    """Menampilkan perbandingan before/after antara video asli dan hasil kompresi."""
+def render_comparison_slider(input_path, output_path, duration):
+    """Render before/after image comparison slider menggunakan iframe component."""
+    import streamlit.components.v1 as components
+
+    timestamp = min(duration * 0.3, 5.0) if duration > 0 else 1.0
+
+    before_b64 = extract_frame(input_path, timestamp)
+    after_b64 = extract_frame(output_path, timestamp)
+
+    if not before_b64 or not after_b64:
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.caption("ASLI")
+            st.video(input_path)
+        with col_b:
+            st.caption("HASIL")
+            st.video(output_path)
+        return
+
+    html_code = """<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: transparent; overflow: hidden; font-family: 'Inter', sans-serif; }
+.wrap {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    border-radius: 12px;
+    cursor: col-resize;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.wrap img.bg {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+.overlay {
+    position: absolute;
+    top: 0; left: 0;
+    width: 50%;
+    height: 100%;
+    overflow: hidden;
+}
+.overlay img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: block;
+    height: 100%;
+    max-width: none;
+}
+.line {
+    position: absolute;
+    top: 0; left: 50%;
+    width: 3px;
+    height: 100%;
+    background: #fff;
+    box-shadow: 0 0 6px rgba(0,0,0,0.6);
+    z-index: 10;
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+.handle {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 38px; height: 38px;
+    background: #fff;
+    border-radius: 50%;
+    z-index: 11;
+    transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+    pointer-events: none;
+}
+.handle svg { width: 18px; height: 18px; }
+.tag {
+    position: absolute;
+    top: 8px;
+    padding: 3px 10px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    z-index: 12;
+    text-transform: uppercase;
+    pointer-events: none;
+}
+.tag-before { right: 8px; background: rgba(239,68,68,0.85); color: #fff; }
+.tag-after { left: 8px; background: rgba(16,185,129,0.85); color: #fff; }
+.hint {
+    text-align: center;
+    font-size: 12px;
+    color: #94a3b8;
+    padding: 8px 0 0;
+}
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap">
+    <span class="tag tag-before">Asli</span>
+    <span class="tag tag-after">Hasil</span>
+    <img class="bg" id="bg" src="data:image/jpeg;base64,__BEFORE__" />
+    <div class="overlay" id="overlay">
+        <img id="afterImg" src="data:image/jpeg;base64,__AFTER__" />
+    </div>
+    <div class="line" id="line"></div>
+    <div class="handle" id="handle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#333" stroke-width="2.5" stroke-linecap="round">
+            <path d="M8 4l-6 8 6 8"/><path d="M16 4l6 8-6 8"/>
+        </svg>
+    </div>
+</div>
+<div class="hint">Geser ke kiri/kanan untuk membandingkan</div>
+<script>
+(function(){
+    var wrap = document.getElementById('wrap');
+    var overlay = document.getElementById('overlay');
+    var afterImg = document.getElementById('afterImg');
+    var line = document.getElementById('line');
+    var handle = document.getElementById('handle');
+    var bg = document.getElementById('bg');
+    var dragging = false;
+
+    function syncSize() {
+        afterImg.style.width = wrap.offsetWidth + 'px';
+    }
+
+    function getPos(e) {
+        var r = wrap.getBoundingClientRect();
+        var cx = e.touches ? e.touches[0].clientX : e.clientX;
+        var x = cx - r.left;
+        return Math.max(0, Math.min(x / r.width * 100, 100));
+    }
+
+    function moveTo(pct) {
+        overlay.style.width = pct + '%';
+        line.style.left = pct + '%';
+        handle.style.left = pct + '%';
+    }
+
+    function onStart(e) {
+        dragging = true;
+        moveTo(getPos(e));
+        e.preventDefault();
+    }
+    function onMove(e) {
+        if (!dragging) return;
+        moveTo(getPos(e));
+        e.preventDefault();
+    }
+    function onEnd() { dragging = false; }
+
+    wrap.addEventListener('mousedown', onStart);
+    wrap.addEventListener('mousemove', onMove);
+    wrap.addEventListener('mouseup', onEnd);
+    wrap.addEventListener('mouseleave', onEnd);
+    wrap.addEventListener('touchstart', onStart, {passive:false});
+    wrap.addEventListener('touchmove', onMove, {passive:false});
+    wrap.addEventListener('touchend', onEnd);
+
+    bg.onload = function() {
+        syncSize();
+        var h = bg.offsetHeight + 30;
+        window.parent.postMessage({type:'streamlit:setFrameHeight', height: h}, '*');
+    };
+    window.addEventListener('resize', function() {
+        syncSize();
+        var h = bg.offsetHeight + 30;
+        window.parent.postMessage({type:'streamlit:setFrameHeight', height: h}, '*');
+    });
+    setTimeout(function(){ syncSize(); }, 200);
+})();
+</script>
+</body>
+</html>"""
+
+    html_final = html_code.replace("__BEFORE__", before_b64).replace("__AFTER__", after_b64)
+    components.html(html_final, height=500, scrolling=False)
+
+
+def render_before_after(input_path, output_path, original_size, uploaded_name, video_metadata):
     compressed_size = os.path.getsize(output_path)
     reduction = calculate_reduction(original_size, compressed_size)
 
@@ -702,52 +932,37 @@ def render_before_after(input_path, output_path, original_size, uploaded_name):
         unsafe_allow_html=True,
     )
 
-    st.subheader("Perbandingan")
+    duration = video_metadata.get("duration", 0) if video_metadata else 0
+    render_comparison_slider(input_path, output_path, duration)
 
-    col_before, col_after = st.columns(2)
+    st.markdown('<div class="section-title">Ukuran File</div>', unsafe_allow_html=True)
+    col_s1, col_s2 = st.columns(2)
+    col_s1.metric("Asli", format_filesize(original_size))
+    col_s2.metric("Hasil", format_filesize(compressed_size), delta="-" + f"{reduction:.1f}" + "%", delta_color="normal")
 
-    with col_before:
-        st.markdown(
-            '<div class="compare-label compare-original">ASLI</div>',
-            unsafe_allow_html=True,
-        )
-        st.video(input_path)
-        st.metric("Ukuran Asli", format_filesize(original_size))
-
-    with col_after:
-        st.markdown(
-            '<div class="compare-label compare-compressed">HASIL</div>',
-            unsafe_allow_html=True,
-        )
-        st.video(output_path)
-        st.metric("Ukuran Hasil", format_filesize(compressed_size))
-
-    input_meta = probe_video(input_path)
     output_meta = probe_video(output_path)
-
-    if input_meta and output_meta:
-        st.subheader("Detail Perbandingan")
-
+    if video_metadata and output_meta:
+        st.markdown('<div class="section-title">Detail Teknis</div>', unsafe_allow_html=True)
         col_h1, col_h2, col_h3 = st.columns(3)
         col_h1.write("**Parameter**")
         col_h2.write("**Asli**")
         col_h3.write("**Hasil**")
 
         params = [
-            ("Ukuran File", format_filesize(original_size), format_filesize(compressed_size)),
-            ("Resolusi", input_meta.get("resolution_text", "-"), output_meta.get("resolution_text", "-")),
-            ("Codec", input_meta.get("codec", "-"), output_meta.get("codec", "-")),
-            ("FPS", str(input_meta.get("fps", "-")), str(output_meta.get("fps", "-"))),
-            ("Bitrate", input_meta.get("bitrate_text", "-"), output_meta.get("bitrate_text", "-")),
+            ("Resolusi", video_metadata.get("resolution_text", "-"), output_meta.get("resolution_text", "-")),
+            ("Codec", video_metadata.get("codec", "-"), output_meta.get("codec", "-")),
+            ("FPS", str(video_metadata.get("fps", "-")), str(output_meta.get("fps", "-"))),
+            ("Bitrate", video_metadata.get("bitrate_text", "-"), output_meta.get("bitrate_text", "-")),
         ]
-
         for label, val_before, val_after in params:
             c1, c2, c3 = st.columns(3)
             c1.write(label)
             c2.write(val_before)
             c3.write(val_after)
 
-    st.divider()
+    st.write("")
+
+    st.video(output_path)
 
     download_name = get_clean_filename(uploaded_name)
     file_data = load_file_bytes(output_path)
@@ -760,12 +975,10 @@ def render_before_after(input_path, output_path, original_size, uploaded_name):
 
 
 def render_features():
-    """Menampilkan highlight fitur aplikasi."""
-    st.divider()
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("**Aman**")
-        st.caption("Video diproses di server, tidak disimpan permanen.")
+        st.caption("Video tidak disimpan permanen di server.")
     with c2:
         st.markdown("**Tanpa Watermark**")
         st.caption("Hasil kompresi bersih tanpa tanda air.")
@@ -796,7 +1009,6 @@ def main():
 
     render_header()
     render_features()
-
     st.divider()
 
     uploaded_file = st.file_uploader(
@@ -805,51 +1017,108 @@ def main():
         help="Format: MP4, MOV, MKV, AVI, WebM. Maks 500MB.",
     )
 
+    # --- Session token: unik per browser/tab ---
+    params = st.query_params
+    session_token = params.get("sid", "")
+    if not session_token:
+        session_token = uuid.uuid4().hex[:16]
+        st.query_params["sid"] = session_token
+
     if uploaded_file is None:
-        if "input_path" in st.session_state:
-            for key in ["input_path", "input_name", "input_size", "input_size_raw", "video_metadata"]:
-                st.session_state.pop(key, None)
+        has_session = (
+            "input_path" in st.session_state
+            and os.path.exists(st.session_state["input_path"])
+        )
 
-        st.info("Upload video untuk memulai kompresi.")
-        render_footer()
-        return
+        if has_session:
+            input_path = st.session_state["input_path"]
+            original_size = st.session_state["input_size"]
+        else:
+            recent = find_recent_session(session_token)
+            if recent and os.path.exists(recent.get("file_path", "")):
+                st.info("Kami menemukan sesi sebelumnya.")
+                col_info, col_btn = st.columns([3, 1])
+                with col_info:
+                    st.markdown(
+                        "**" + recent["original_name"] + "** ("
+                        + format_filesize(recent["file_size"]) + ")"
+                    )
+                    age_min = int((time.time() - recent["timestamp"]) / 60)
+                    st.caption(str(age_min) + " menit yang lalu")
+                with col_btn:
+                    if st.button("Lanjutkan", use_container_width=True):
+                        st.session_state["input_path"] = recent["file_path"]
+                        st.session_state["input_name"] = recent["original_name"]
+                        st.session_state["input_size"] = recent["file_size"]
+                        st.session_state["input_size_raw"] = recent["file_size"]
+                        st.session_state.pop("video_metadata", None)
+                        st.rerun()
+            else:
+                st.info("Upload video untuk memulai kompresi.")
 
-    file_changed = (
-        "input_name" not in st.session_state
-        or st.session_state["input_name"] != uploaded_file.name
-        or st.session_state.get("input_size_raw") != uploaded_file.size
-    )
-
-    if file_changed:
-        input_path = save_upload_to_temp(uploaded_file)
-        original_size = os.path.getsize(input_path)
-        video_metadata = probe_video(input_path)
-
-        st.session_state["input_path"] = input_path
-        st.session_state["input_name"] = uploaded_file.name
-        st.session_state["input_size"] = original_size
-        st.session_state["input_size_raw"] = uploaded_file.size
-        st.session_state["video_metadata"] = video_metadata
+            render_footer()
+            return
     else:
-        input_path = st.session_state["input_path"]
-        original_size = st.session_state["input_size"]
-        video_metadata = st.session_state.get("video_metadata")
+        file_changed = (
+            "input_name" not in st.session_state
+            or st.session_state["input_name"] != uploaded_file.name
+            or st.session_state.get("input_size_raw") != uploaded_file.size
+        )
 
-    st.success("File terpilih: **" + uploaded_file.name + "** (" + format_filesize(original_size) + ")")
+        if file_changed:
+            with st.spinner("Menyimpan video..."):
+                input_path = save_upload_to_temp(uploaded_file, session_token)
+                original_size = os.path.getsize(input_path)
 
-    if video_metadata:
-        with st.expander("Info Video", expanded=False):
+            st.session_state["input_path"] = input_path
+            st.session_state["input_name"] = uploaded_file.name
+            st.session_state["input_size"] = original_size
+            st.session_state["input_size_raw"] = uploaded_file.size
+            st.session_state.pop("video_metadata", None)
+        else:
+            input_path = st.session_state["input_path"]
+            original_size = st.session_state["input_size"]
+
+    uploaded_name = st.session_state.get("input_name", "video.mp4")
+
+    st.success("File terpilih: **" + uploaded_name + "** (**" + format_filesize(original_size) + "**)")
+
+    video_metadata = st.session_state.get("video_metadata")
+
+    show_info = st.checkbox("Tampilkan info video", value=False)
+    if show_info:
+        if video_metadata is None:
+            with st.spinner("Membaca metadata..."):
+                video_metadata = probe_video(input_path)
+                st.session_state["video_metadata"] = video_metadata
+        if video_metadata:
             render_video_info(video_metadata)
 
     preset = render_platform_presets()
     settings = render_compression_controls(preset, video_metadata)
-    advanced = render_advanced_controls(preset, video_metadata)
+
+    show_advanced = st.checkbox("Tampilkan pengaturan lanjutan", value=False)
+    if show_advanced:
+        advanced = render_advanced_controls(preset, video_metadata)
+    else:
+        advanced = {
+            "trim_start": None,
+            "trim_end": None,
+            "target_fps": preset.get("fps"),
+            "aspect_ratio": preset.get("aspect"),
+            "max_bitrate": preset.get("max_bitrate"),
+        }
 
     st.write("")
 
     if st.button("Mulai Kompresi", use_container_width=True):
         output_path = input_path + "_out.mp4"
         _temp_files.append(output_path)
+
+        if video_metadata is None:
+            with st.spinner("Membaca metadata..."):
+                video_metadata = probe_video(input_path)
+                st.session_state["video_metadata"] = video_metadata
 
         total_duration = 0
         if video_metadata:
@@ -885,11 +1154,11 @@ def main():
 
         if success:
             progress_bar.progress(100, text="Selesai!")
-            render_before_after(input_path, output_path, original_size, uploaded_file.name)
+            render_before_after(input_path, output_path, original_size, uploaded_name, video_metadata)
         else:
             progress_bar.empty()
             st.error("Terjadi kesalahan saat memproses video.")
-            with st.expander("Detail Error"):
+            with st.container():
                 st.code(error_msg, language="text")
 
     render_footer()
