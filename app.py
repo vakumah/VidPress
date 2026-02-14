@@ -1,9 +1,8 @@
 """
-VidPress — Professional video compression and optimization toolkit.
+Kompres - Kompresi dan optimasi video untuk platform sosial media.
 
-Supports WhatsApp, Instagram, Telegram, and general social media platforms.
-Features color-accurate encoding with BT.709 HD, H.264 High Profile,
-video trimming, frame rate control, and platform-specific presets.
+Mendukung WhatsApp, Instagram, Telegram dengan encoding H.264 High Profile
+dan kalibrasi warna BT.709.
 
 Copyright (C) 2026 Garden
 Licensed under GNU General Public License v3.0
@@ -18,18 +17,15 @@ import math
 import subprocess
 import re
 import atexit
-import shutil
 
+APP_VERSION = "6.0.0"
+APP_TITLE = "Kompres"
+APP_TAGLINE = "Kompresi Video Profesional"
 
-APP_VERSION = "5.1.0"
-
+SUPPORTED_FORMATS = ["mp4", "mov", "mkv", "avi", "webm"]
 FFMPEG_THREADS = 0
 
 _temp_files = []
-APP_TITLE = "VidPress"
-APP_TAGLINE = "Kompresi & Optimasi Video Profesional"
-
-SUPPORTED_FORMATS = ["mp4", "mov", "mkv", "avi", "webm"]
 
 RESOLUTION_MAP = {
     "1080p": 1080,
@@ -41,22 +37,22 @@ RESOLUTION_MAP = {
 SPEED_OPTIONS = ["ultrafast", "fast", "medium", "slow", "veryslow"]
 
 FRAMERATE_OPTIONS = {
-    "Bawaan (Tidak diubah)": None,
+    "Bawaan": None,
     "60 FPS": 60,
     "30 FPS": 30,
-    "24 FPS (Sinematik)": 24,
+    "24 FPS": 24,
 }
 
 ASPECT_RATIOS = {
-    "Bawaan (Tidak diubah)": None,
-    "16:9 (Landscape)": "16:9",
-    "9:16 (Portrait/Story)": "9:16",
-    "1:1 (Square)": "1:1",
-    "4:3 (Klasik)": "4:3",
+    "Bawaan": None,
+    "16:9 Landscape": "16:9",
+    "9:16 Portrait": "9:16",
+    "1:1 Square": "1:1",
+    "4:3 Klasik": "4:3",
 }
 
 PLATFORM_PRESETS = {
-    "Custom (Manual)": {
+    "Custom": {
         "crf": 28,
         "preset": "medium",
         "resolution": "720p",
@@ -72,7 +68,7 @@ PLATFORM_PRESETS = {
         "max_bitrate": "2M",
         "fps": 30,
         "aspect": None,
-        "description": "Optimal untuk pengiriman via WhatsApp. Ukuran kecil, kualitas tetap bagus.",
+        "description": "Optimal untuk pengiriman via WhatsApp.",
     },
     "Instagram Feed": {
         "crf": 23,
@@ -81,16 +77,16 @@ PLATFORM_PRESETS = {
         "max_bitrate": "3.5M",
         "fps": 30,
         "aspect": "1:1",
-        "description": "Square format untuk feed Instagram. Kualitas tinggi.",
+        "description": "Square format untuk feed Instagram.",
     },
-    "Instagram Story/Reels": {
+    "Instagram Story": {
         "crf": 23,
         "preset": "slow",
         "resolution": "1080p",
         "max_bitrate": "4M",
         "fps": 30,
         "aspect": "9:16",
-        "description": "Format vertikal penuh untuk Story dan Reels.",
+        "description": "Format vertikal untuk Story dan Reels.",
     },
     "Telegram": {
         "crf": 26,
@@ -99,16 +95,16 @@ PLATFORM_PRESETS = {
         "max_bitrate": None,
         "fps": None,
         "aspect": None,
-        "description": "Pengiriman via Telegram dengan kualitas dan ukuran seimbang.",
+        "description": "Kualitas dan ukuran seimbang untuk Telegram.",
     },
-    "Email / Ukuran Minimal": {
+    "Email": {
         "crf": 32,
         "preset": "slow",
         "resolution": "480p",
         "max_bitrate": "1M",
         "fps": 24,
         "aspect": None,
-        "description": "Ukuran file sekecil mungkin untuk lampiran email.",
+        "description": "Ukuran file minimal untuk lampiran email.",
     },
 }
 
@@ -175,56 +171,6 @@ PAGE_STYLES = """
         letter-spacing: 0.04em;
     }
 
-    .info-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: 0.6rem;
-        margin: 0.8rem 0;
-    }
-
-    .info-tile {
-        background: linear-gradient(145deg, rgba(124, 58, 237, 0.07), rgba(99, 102, 241, 0.03));
-        border: 1px solid rgba(124, 58, 237, 0.15);
-        border-radius: 10px;
-        padding: 0.8rem 1rem;
-    }
-
-    .info-tile .tile-label {
-        font-size: 0.7rem;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: #94a3b8;
-        font-weight: 500;
-        margin-bottom: 0.15rem;
-    }
-
-    .info-tile .tile-value {
-        font-size: 1.05rem;
-        font-weight: 700;
-        color: #e2e8f0;
-    }
-
-    .file-card {
-        background: linear-gradient(145deg, rgba(124, 58, 237, 0.08), rgba(99, 102, 241, 0.03));
-        border: 1px solid rgba(124, 58, 237, 0.18);
-        border-radius: 14px;
-        padding: 1.2rem;
-        margin: 0.8rem 0;
-    }
-
-    .file-card .file-name {
-        font-size: 1.1rem;
-        font-weight: 700;
-        color: #e2e8f0;
-        word-break: break-all;
-    }
-
-    .file-card .file-size {
-        font-size: 0.85rem;
-        color: #94a3b8;
-        margin-top: 0.2rem;
-    }
-
     .preset-info {
         background: rgba(99, 102, 241, 0.08);
         border-left: 3px solid #7c3aed;
@@ -255,7 +201,7 @@ PAGE_STYLES = """
         font-size: 0.92rem;
     }
 
-    .result-panel .reduction-badge {
+    .reduction-badge {
         display: inline-block;
         background: rgba(16, 185, 129, 0.2);
         color: #34d399;
@@ -341,20 +287,41 @@ PAGE_STYLES = """
         box-shadow: 0 8px 20px rgba(5, 150, 105, 0.4);
     }
 
-    .tab-section-title {
-        font-size: 0.78rem;
+    .compare-label {
+        text-align: center;
+        font-size: 0.75rem;
+        font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.08em;
-        color: #64748b;
-        font-weight: 600;
-        margin: 1rem 0 0.4rem;
+        padding: 0.4rem 0;
+        border-radius: 6px;
+        margin-bottom: 0.4rem;
+    }
+
+    .compare-original {
+        background: rgba(239, 68, 68, 0.12);
+        color: #f87171;
+    }
+
+    .compare-compressed {
+        background: rgba(16, 185, 129, 0.12);
+        color: #34d399;
+    }
+
+    .feature-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.5rem 0.8rem;
+        border-radius: 8px;
+        font-size: 0.82rem;
+        font-weight: 500;
     }
 </style>
 """
 
 
-def format_filesize(size_bytes: int) -> str:
-    """Mengubah ukuran byte menjadi format yang mudah dibaca."""
+def format_filesize(size_bytes):
     if size_bytes == 0:
         return "0 B"
     units = ["B", "KB", "MB", "GB"]
@@ -363,8 +330,7 @@ def format_filesize(size_bytes: int) -> str:
     return f"{value:.2f} {units[exp]}"
 
 
-def format_duration(seconds: float) -> str:
-    """Mengubah durasi detik menjadi format mm:ss atau hh:mm:ss."""
+def format_duration(seconds):
     total = int(seconds)
     hours, remainder = divmod(total, 3600)
     minutes, secs = divmod(remainder, 60)
@@ -373,16 +339,21 @@ def format_duration(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def calculate_reduction(original: int, compressed: int) -> float:
-    """Menghitung persentase pengurangan ukuran file."""
+def calculate_reduction(original, compressed):
     if original == 0:
         return 0.0
     return ((original - compressed) / original) * 100
 
 
-@st.cache_data(show_spinner=False, ttl=300)
-def probe_video(file_path: str) -> dict | None:
-    """Mendapatkan metadata video menggunakan ffprobe. Hasil di-cache selama 5 menit."""
+def get_clean_filename(uploaded_name):
+    """Menghasilkan nama file download yang bersih tanpa duplikat ekstensi."""
+    p = pathlib.Path(uploaded_name)
+    name_without_ext = p.stem
+    return f"kompres_{name_without_ext}.mp4"
+
+
+def probe_video(file_path):
+    """Mendapatkan metadata video menggunakan ffprobe."""
     try:
         info = ffmpeg.probe(file_path)
         video_stream = next(
@@ -407,57 +378,44 @@ def probe_video(file_path: str) -> dict | None:
 
         if video_stream:
             fps_parts = video_stream.get("r_frame_rate", "0/1").split("/")
-            fps = round(int(fps_parts[0]) / max(int(fps_parts[1]), 1), 1) if len(fps_parts) == 2 else 0
-
-            result.update({
-                "width": int(video_stream.get("width", 0)),
-                "height": int(video_stream.get("height", 0)),
-                "codec": video_stream.get("codec_name", "unknown").upper(),
-                "fps": fps,
-                "resolution_text": f"{video_stream.get('width')}×{video_stream.get('height')}",
-            })
+            if len(fps_parts) == 2 and int(fps_parts[1]) > 0:
+                fps = round(int(fps_parts[0]) / int(fps_parts[1]), 1)
+            else:
+                fps = 0
+            result["width"] = int(video_stream.get("width", 0))
+            result["height"] = int(video_stream.get("height", 0))
+            result["codec"] = video_stream.get("codec_name", "unknown").upper()
+            result["fps"] = fps
+            result["resolution_text"] = str(video_stream.get("width", 0)) + "x" + str(video_stream.get("height", 0))
 
         if audio_stream:
             result["audio_codec"] = audio_stream.get("codec_name", "unknown").upper()
-            result["audio_bitrate"] = int(audio_stream.get("bit_rate", 0)) // 1000
+            ab = audio_stream.get("bit_rate", 0)
+            result["audio_bitrate"] = int(ab) // 1000 if ab else 0
 
         return result
-
     except Exception:
         return None
 
 
-def build_scale_filter(resolution: str, target_height: int) -> tuple[str, int | str]:
-    """Membuat parameter scale filter berdasarkan resolusi target."""
-    if resolution == "original":
-        return ("trunc(iw/2)*2", "trunc(ih/2)*2")
-    return ("trunc(oh*a/2)*2", target_height)
-
-
 def compress_video(
-    input_path: str,
-    output_path: str,
-    crf: int,
-    preset: str,
-    mute_audio: bool,
-    resolution: str,
-    trim_start: float | None = None,
-    trim_end: float | None = None,
-    target_fps: int | None = None,
-    aspect_ratio: str | None = None,
-    max_bitrate: str | None = None,
+    input_path,
+    output_path,
+    crf,
+    preset,
+    mute_audio,
+    resolution,
+    trim_start=None,
+    trim_end=None,
+    target_fps=None,
+    aspect_ratio=None,
+    max_bitrate=None,
     progress_callback=None,
-    duration_seconds: float = 0,
-) -> tuple[bool, str | None]:
+    duration_seconds=0,
+):
     """
-    Menjalankan proses kompresi dan optimasi video.
-
-    Menggunakan H.264 High Profile dengan kalibrasi warna BT.709.
-    Mendukung trimming, perubahan FPS, crop aspect ratio, bitrate limiting,
-    dan multi-threaded encoding untuk performa optimal.
-
-    Returns:
-        Tuple berisi status sukses (bool) dan pesan error jika gagal.
+    Kompresi video dengan H.264 High Profile dan kalibrasi warna BT.709.
+    Mendukung trimming, FPS, crop, dan bitrate limiting.
     """
     try:
         input_args = {}
@@ -484,10 +442,11 @@ def compress_video(
                 "4:3": "4/3",
             }
             if aspect_ratio in ratio_map:
+                r = ratio_map[aspect_ratio]
                 video = ffmpeg.filter(
                     video, "crop",
-                    f"if(gt(iw/ih,{ratio_map[aspect_ratio]}),ih*{ratio_map[aspect_ratio]},iw)",
-                    f"if(gt(iw/ih,{ratio_map[aspect_ratio]}),ih,iw/({ratio_map[aspect_ratio]}))",
+                    "if(gt(iw/ih," + r + "),ih*" + r + ",iw)",
+                    "if(gt(iw/ih," + r + "),ih,iw/(" + r + "))",
                 )
                 video = ffmpeg.filter(video, "scale", "trunc(iw/2)*2", "trunc(ih/2)*2")
 
@@ -502,20 +461,18 @@ def compress_video(
             "profile:v": "high",
             "tune": "film",
             "threads": FFMPEG_THREADS,
-            **COLOR_PROFILE,
         }
+        encoding_params.update(COLOR_PROFILE)
 
         if max_bitrate:
             encoding_params["maxrate"] = max_bitrate
             encoding_params["bufsize"] = max_bitrate
 
         if mute_audio:
-            output = ffmpeg.output(video, output_path, **encoding_params, an=None)
+            output = ffmpeg.output(video, output_path, an=None, **encoding_params)
         else:
             audio_params = {"c:a": "aac", "b:a": "96k", "ac": 2}
-            output = ffmpeg.output(
-                audio, video, output_path, **audio_params, **encoding_params
-            )
+            output = ffmpeg.output(audio, video, output_path, **audio_params, **encoding_params)
 
         cmd = ffmpeg.compile(output, overwrite_output=True)
 
@@ -524,21 +481,23 @@ def compress_video(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
             )
             pattern = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
-            stderr_output: list[str] = []
+            stderr_lines = []
 
             if process.stderr is not None:
                 for line in iter(process.stderr.readline, ""):
-                    stderr_output.append(line)
+                    stderr_lines.append(line)
                     match = pattern.search(line)
                     if match:
-                        h, m, s = float(match.group(1)), float(match.group(2)), float(match.group(3))
+                        h = float(match.group(1))
+                        m = float(match.group(2))
+                        s = float(match.group(3))
                         elapsed = h * 3600 + m * 60 + s
                         pct = min(elapsed / duration_seconds, 1.0)
                         progress_callback(pct)
 
             process.wait()
             if process.returncode != 0:
-                tail = stderr_output[-50:] if len(stderr_output) > 50 else stderr_output
+                tail = stderr_lines[-50:] if len(stderr_lines) > 50 else stderr_lines
                 return False, "".join(tail)
         else:
             ffmpeg.run(output, overwrite_output=True, capture_stdout=True, capture_stderr=True)
@@ -550,8 +509,8 @@ def compress_video(
         return False, error_detail
 
 
-def save_upload_to_temp(uploaded_file) -> str:
-    """Menyimpan file upload ke lokasi sementara. Dipanggil hanya sekali per file."""
+def save_upload_to_temp(uploaded_file):
+    """Menyimpan file upload ke lokasi sementara."""
     suffix = pathlib.Path(uploaded_file.name).suffix or ".mp4"
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     _temp_files.append(temp.name)
@@ -561,12 +520,11 @@ def save_upload_to_temp(uploaded_file) -> str:
 
 
 def cleanup_temp_files():
-    """Menghapus semua file sementara yang dibuat selama sesi."""
     for path in _temp_files:
         try:
             if os.path.exists(path):
                 os.unlink(path)
-            compressed = path + "_compressed.mp4"
+            compressed = path + "_out.mp4"
             if os.path.exists(compressed):
                 os.unlink(compressed)
         except OSError:
@@ -578,88 +536,72 @@ atexit.register(cleanup_temp_files)
 
 
 @st.cache_data(show_spinner=False, ttl=600)
-def load_file_bytes(file_path: str) -> bytes:
-    """Membaca file dan meng-cache hasilnya untuk download yang lebih cepat."""
+def load_file_bytes(file_path):
     with open(file_path, "rb") as f:
         return f.read()
 
 
 def render_header():
-    """Menampilkan header dan branding aplikasi."""
     st.markdown(PAGE_STYLES, unsafe_allow_html=True)
     st.markdown(
-        f"""
-        <div class="app-hero">
-            <div class="brand">{APP_TITLE}</div>
-            <p class="tagline">{APP_TAGLINE}</p>
-            <span class="version-badge">v{APP_VERSION}</span>
-        </div>
-        """,
+        '<div class="app-hero">'
+        '<div class="brand">' + APP_TITLE + '</div>'
+        '<p class="tagline">' + APP_TAGLINE + '</p>'
+        '<span class="version-badge">v' + APP_VERSION + '</span>'
+        '</div>',
         unsafe_allow_html=True,
     )
 
 
-def render_video_info(metadata: dict):
-    """Menampilkan informasi metadata video dalam grid."""
-    cols = []
-    cols.append({"label": "Durasi", "value": metadata.get("duration_text", "N/A")})
-    cols.append({"label": "Resolusi", "value": metadata.get("resolution_text", "N/A")})
-    cols.append({"label": "Codec", "value": metadata.get("codec", "N/A")})
-    cols.append({"label": "Frame Rate", "value": f"{metadata.get('fps', 0)} FPS"})
-    cols.append({"label": "Bitrate", "value": metadata.get("bitrate_text", "N/A")})
-    cols.append({"label": "Audio", "value": metadata.get("audio_codec", "Tidak ada")})
+def render_video_info(metadata):
+    """Menampilkan metadata video menggunakan komponen native Streamlit."""
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Durasi", metadata.get("duration_text", "N/A"))
+    c2.metric("Resolusi", metadata.get("resolution_text", "N/A"))
+    c3.metric("Codec", metadata.get("codec", "N/A"))
 
-    tiles_html = ""
-    for col in cols:
-        tiles_html += f"""
-            <div class="info-tile">
-                <div class="tile-label">{col['label']}</div>
-                <div class="tile-value">{col['value']}</div>
-            </div>
-        """
-
-    st.markdown(f'<div class="info-grid">{tiles_html}</div>', unsafe_allow_html=True)
+    c4, c5, c6 = st.columns(3)
+    c4.metric("FPS", str(metadata.get("fps", 0)))
+    c5.metric("Bitrate", metadata.get("bitrate_text", "N/A"))
+    c6.metric("Audio", metadata.get("audio_codec", "Tidak ada"))
 
 
-def render_platform_presets() -> dict:
-    """Menampilkan pemilihan platform preset."""
+def render_platform_presets():
     preset_name = st.selectbox(
         "Platform Target",
         list(PLATFORM_PRESETS.keys()),
         index=0,
-        help="Pilih platform tujuan untuk mengatur parameter secara otomatis.",
+        help="Pilih platform tujuan untuk mengatur parameter otomatis.",
     )
-
     preset = PLATFORM_PRESETS[preset_name]
 
-    if preset_name != "Custom (Manual)":
+    if preset_name != "Custom":
         st.markdown(
-            f'<div class="preset-info">{preset["description"]}</div>',
+            '<div class="preset-info">' + preset["description"] + '</div>',
             unsafe_allow_html=True,
         )
 
     return {"name": preset_name, **preset}
 
 
-def render_compression_controls(preset: dict, video_metadata: dict | None) -> dict:
-    """Menampilkan kontrol pengaturan kompresi."""
-    is_custom = preset["name"] == "Custom (Manual)"
+def render_compression_controls(preset, video_metadata):
+    is_custom = preset["name"] == "Custom"
     settings = {}
 
-    with st.expander("Kompresi & Kualitas", expanded=True):
+    with st.expander("Kompresi dan Kualitas", expanded=True):
         if is_custom:
             settings["crf"] = st.slider(
                 "Level Kompresi (CRF)",
                 min_value=18,
                 max_value=36,
                 value=preset["crf"],
-                help="Nilai lebih tinggi = file lebih kecil, kualitas sedikit berkurang. 18-22 hampir lossless, 28-32 untuk ukuran minimal.",
+                help="Nilai lebih tinggi = file lebih kecil. 18-22 hampir lossless, 28-32 ukuran minimal.",
             )
             settings["preset"] = st.select_slider(
                 "Kecepatan Encoding",
                 options=SPEED_OPTIONS,
                 value=preset["preset"],
-                help="Encoding lebih lambat menghasilkan kompresi lebih efisien dengan kualitas yang sama.",
+                help="Encoding lambat menghasilkan kompresi lebih efisien.",
             )
             res_options = ["Resolusi Asli"] + list(RESOLUTION_MAP.keys())
             res_index = 0
@@ -672,8 +614,8 @@ def render_compression_controls(preset: dict, video_metadata: dict | None) -> di
             settings["preset"] = preset["preset"]
             settings["resolution"] = preset["resolution"]
             st.info(
-                f"CRF: {preset['crf']} · Preset: {preset['preset']} · "
-                f"Resolusi: {preset['resolution']}",
+                "CRF: " + str(preset["crf"]) + " | Preset: " + preset["preset"] + " | "
+                "Resolusi: " + preset["resolution"]
             )
 
         settings["mute_audio"] = st.checkbox("Nonaktifkan Audio")
@@ -681,12 +623,11 @@ def render_compression_controls(preset: dict, video_metadata: dict | None) -> di
     return settings
 
 
-def render_advanced_controls(preset: dict, video_metadata: dict | None) -> dict:
-    """Menampilkan kontrol lanjutan: trimming, FPS, aspect ratio."""
+def render_advanced_controls(preset, video_metadata):
     advanced = {}
 
     with st.expander("Pengaturan Lanjutan"):
-        st.markdown('<div class="tab-section-title">Potong Video</div>', unsafe_allow_html=True)
+        st.caption("POTONG VIDEO")
 
         max_duration = video_metadata.get("duration", 600) if video_metadata else 600
 
@@ -695,7 +636,7 @@ def render_advanced_controls(preset: dict, video_metadata: dict | None) -> dict:
             trim_start = st.number_input(
                 "Mulai dari (detik)",
                 min_value=0.0,
-                max_value=max_duration,
+                max_value=float(max_duration),
                 value=0.0,
                 step=0.5,
                 format="%.1f",
@@ -704,7 +645,7 @@ def render_advanced_controls(preset: dict, video_metadata: dict | None) -> dict:
             trim_end = st.number_input(
                 "Sampai (detik)",
                 min_value=0.0,
-                max_value=max_duration,
+                max_value=float(max_duration),
                 value=0.0,
                 step=0.5,
                 format="%.1f",
@@ -714,11 +655,11 @@ def render_advanced_controls(preset: dict, video_metadata: dict | None) -> dict:
         advanced["trim_start"] = trim_start if trim_start > 0 else None
         advanced["trim_end"] = trim_end if trim_end > 0 else None
 
-        st.markdown('<div class="tab-section-title">Frame Rate & Rasio</div>', unsafe_allow_html=True)
+        st.caption("FRAME RATE DAN RASIO")
 
         col_fps, col_ratio = st.columns(2)
 
-        is_custom = preset["name"] == "Custom (Manual)"
+        is_custom = preset["name"] == "Custom"
 
         with col_fps:
             if is_custom:
@@ -726,7 +667,7 @@ def render_advanced_controls(preset: dict, video_metadata: dict | None) -> dict:
                 advanced["target_fps"] = FRAMERATE_OPTIONS[fps_label]
             else:
                 advanced["target_fps"] = preset.get("fps")
-                fps_display = f"{preset['fps']} FPS" if preset.get("fps") else "Bawaan"
+                fps_display = str(preset["fps"]) + " FPS" if preset.get("fps") else "Bawaan"
                 st.text_input("Frame Rate", value=fps_display, disabled=True)
 
         with col_ratio:
@@ -735,7 +676,7 @@ def render_advanced_controls(preset: dict, video_metadata: dict | None) -> dict:
                 advanced["aspect_ratio"] = ASPECT_RATIOS[aspect_label]
             else:
                 advanced["aspect_ratio"] = preset.get("aspect")
-                aspect_display = preset.get("aspect", "Bawaan") or "Bawaan"
+                aspect_display = preset.get("aspect") or "Bawaan"
                 st.text_input("Aspect Ratio", value=aspect_display, disabled=True)
 
         advanced["max_bitrate"] = preset.get("max_bitrate")
@@ -743,88 +684,133 @@ def render_advanced_controls(preset: dict, video_metadata: dict | None) -> dict:
     return advanced
 
 
-def render_result(output_path: str, original_size: int):
-    """Menampilkan hasil kompresi beserta statistik."""
+def render_before_after(input_path, output_path, original_size, uploaded_name):
+    """Menampilkan perbandingan before/after antara video asli dan hasil kompresi."""
     compressed_size = os.path.getsize(output_path)
     reduction = calculate_reduction(original_size, compressed_size)
 
     st.markdown(
-        f"""
-        <div class="result-panel">
-            <h3>Kompresi Berhasil</h3>
-            <div class="result-stats">
-                {format_filesize(original_size)} → <strong>{format_filesize(compressed_size)}</strong>
-                &nbsp;&nbsp;
-                <span class="reduction-badge">-{reduction:.1f}%</span>
-            </div>
-        </div>
-        """,
+        '<div class="result-panel">'
+        '<h3>Kompresi Berhasil</h3>'
+        '<div class="result-stats">'
+        + format_filesize(original_size) + ' menjadi '
+        '<strong>' + format_filesize(compressed_size) + '</strong>'
+        ' &nbsp; '
+        '<span class="reduction-badge">Hemat ' + f"{reduction:.1f}" + '%</span>'
+        '</div>'
+        '</div>',
         unsafe_allow_html=True,
     )
 
-    st.video(output_path)
+    st.subheader("Perbandingan")
 
+    col_before, col_after = st.columns(2)
+
+    with col_before:
+        st.markdown(
+            '<div class="compare-label compare-original">ASLI</div>',
+            unsafe_allow_html=True,
+        )
+        st.video(input_path)
+        st.metric("Ukuran Asli", format_filesize(original_size))
+
+    with col_after:
+        st.markdown(
+            '<div class="compare-label compare-compressed">HASIL</div>',
+            unsafe_allow_html=True,
+        )
+        st.video(output_path)
+        st.metric("Ukuran Hasil", format_filesize(compressed_size))
+
+    input_meta = probe_video(input_path)
+    output_meta = probe_video(output_path)
+
+    if input_meta and output_meta:
+        st.subheader("Detail Perbandingan")
+
+        col_h1, col_h2, col_h3 = st.columns(3)
+        col_h1.write("**Parameter**")
+        col_h2.write("**Asli**")
+        col_h3.write("**Hasil**")
+
+        params = [
+            ("Ukuran File", format_filesize(original_size), format_filesize(compressed_size)),
+            ("Resolusi", input_meta.get("resolution_text", "-"), output_meta.get("resolution_text", "-")),
+            ("Codec", input_meta.get("codec", "-"), output_meta.get("codec", "-")),
+            ("FPS", str(input_meta.get("fps", "-")), str(output_meta.get("fps", "-"))),
+            ("Bitrate", input_meta.get("bitrate_text", "-"), output_meta.get("bitrate_text", "-")),
+        ]
+
+        for label, val_before, val_after in params:
+            c1, c2, c3 = st.columns(3)
+            c1.write(label)
+            c2.write(val_before)
+            c3.write(val_after)
+
+    st.divider()
+
+    download_name = get_clean_filename(uploaded_name)
     file_data = load_file_bytes(output_path)
-    stem = pathlib.Path(output_path).stem.replace("_compressed", "")
-    output_name = f"vidpress_{stem}.mp4"
     st.download_button(
-        label="Download Hasil",
+        label="Download Hasil Kompresi",
         data=file_data,
-        file_name=output_name,
+        file_name=download_name,
         mime="video/mp4",
     )
 
 
+def render_features():
+    """Menampilkan highlight fitur aplikasi."""
+    st.divider()
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**Aman**")
+        st.caption("Video diproses di server, tidak disimpan permanen.")
+    with c2:
+        st.markdown("**Tanpa Watermark**")
+        st.caption("Hasil kompresi bersih tanpa tanda air.")
+    with c3:
+        st.markdown("**Gratis**")
+        st.caption("Gunakan tanpa batas, tanpa biaya.")
+
+
 def render_footer():
-    """Menampilkan footer kredit dan lisensi."""
     st.markdown(
-        f"""
-        <div class="footer-section">
-            Dibuat oleh <a href="#">Garden</a> &middot; VidPress v{APP_VERSION}<br>
-            <span style="font-size: 0.75rem; color: #475569;">
-                Dilisensikan di bawah GNU General Public License v3.0
-            </span>
-        </div>
-        """,
+        '<div class="footer-section">'
+        'Dibuat oleh <a href="#">Garden</a> &middot; ' + APP_TITLE + ' v' + APP_VERSION + '<br>'
+        '<span style="font-size: 0.75rem; color: #475569;">'
+        'Dilisensikan di bawah GNU General Public License v3.0'
+        '</span>'
+        '</div>',
         unsafe_allow_html=True,
     )
 
 
 def main():
     st.set_page_config(
-        page_title=f"{APP_TITLE} — {APP_TAGLINE}",
-        page_icon="🎬",
+        page_title=APP_TITLE + " - " + APP_TAGLINE,
+        page_icon="https://em-content.zobj.net/source/twitter/408/film-frames_1f39e-fe0f.png",
         layout="centered",
         initial_sidebar_state="collapsed",
     )
 
     render_header()
+    render_features()
+
+    st.divider()
 
     uploaded_file = st.file_uploader(
         "Pilih file video",
         type=SUPPORTED_FORMATS,
-        help="Format yang didukung: MP4, MOV, MKV, AVI, WebM — Maks 500MB",
+        help="Format: MP4, MOV, MKV, AVI, WebM. Maks 500MB.",
     )
 
     if uploaded_file is None:
         if "input_path" in st.session_state:
-            del st.session_state["input_path"]
-            del st.session_state["input_name"]
-            del st.session_state["input_size"]
-            if "video_metadata" in st.session_state:
-                del st.session_state["video_metadata"]
+            for key in ["input_path", "input_name", "input_size", "input_size_raw", "video_metadata"]:
+                st.session_state.pop(key, None)
 
-        st.markdown(
-            """
-            <div style="text-align: center; padding: 2.5rem 0; color: #64748b;">
-                <p style="font-size: 2.5rem; margin-bottom: 0.5rem;">🎬</p>
-                <p style="font-size: 0.92rem; margin: 0;">
-                    Drop video di atas atau klik untuk memilih file.
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.info("Upload video untuk memulai kompresi.")
         render_footer()
         return
 
@@ -849,27 +835,20 @@ def main():
         original_size = st.session_state["input_size"]
         video_metadata = st.session_state.get("video_metadata")
 
-    st.markdown(
-        f"""
-        <div class="file-card">
-            <div class="file-name">{uploaded_file.name}</div>
-            <div class="file-size">{format_filesize(original_size)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.success("File terpilih: **" + uploaded_file.name + "** (" + format_filesize(original_size) + ")")
 
     if video_metadata:
-        render_video_info(video_metadata)
+        with st.expander("Info Video", expanded=False):
+            render_video_info(video_metadata)
 
     preset = render_platform_presets()
     settings = render_compression_controls(preset, video_metadata)
     advanced = render_advanced_controls(preset, video_metadata)
 
-    st.markdown("<div style='height: 0.8rem'></div>", unsafe_allow_html=True)
+    st.write("")
 
     if st.button("Mulai Kompresi", use_container_width=True):
-        output_path = input_path + "_compressed.mp4"
+        output_path = input_path + "_out.mp4"
         _temp_files.append(output_path)
 
         total_duration = 0
@@ -885,7 +864,7 @@ def main():
         def on_progress(pct):
             progress_bar.progress(
                 min(int(pct * 100), 99),
-                text=f"Encoding: {int(pct * 100)}%",
+                text="Encoding: " + str(int(pct * 100)) + "%",
             )
 
         success, error_msg = compress_video(
@@ -906,7 +885,7 @@ def main():
 
         if success:
             progress_bar.progress(100, text="Selesai!")
-            render_result(output_path, original_size)
+            render_before_after(input_path, output_path, original_size, uploaded_file.name)
         else:
             progress_bar.empty()
             st.error("Terjadi kesalahan saat memproses video.")
