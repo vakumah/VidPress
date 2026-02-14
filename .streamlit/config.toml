@@ -1,0 +1,21 @@
+[server]
+maxUploadSize = 500
+maxMessageSize = 500
+enableCORS = false
+enableXsrfProtection = true
+enableStaticServing = true
+enableWebsocketCompression = true
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+fastReruns = true
+
+[theme]
+base = "dark"
+primaryColor = "#7c3aed"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1a1f2e"
+textColor = "#e2e8f0"
