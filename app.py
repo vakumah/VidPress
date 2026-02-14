@@ -680,49 +680,15 @@ def load_file_bytes(file_path):
 
 
 def render_header():
-    # --- Dark/Light Mode ---
-    with st.sidebar:
-        st.markdown("### ⚙️ Pengaturan")
-        theme = st.radio("Tema", ["🌙 Dark", "☀️ Light"], index=0, horizontal=True)
-        is_light = theme == "☀️ Light"
-
-        # --- Riwayat Kompresi ---
-        st.markdown("### 📋 Riwayat Kompresi")
-        history = st.session_state.get("compression_history", [])
-        if history:
-            for item in reversed(history[-10:]):
-                st.caption(
-                    "**" + item["name"] + "**\n"
-                    + item["original"] + " → " + item["result"]
-                    + " (" + item["reduction"] + ")"
-                )
-        else:
-            st.caption("Belum ada riwayat kompresi.")
-
-    light_override = ""
-    if is_light:
-        light_override = """
-        <style>
-            section[data-testid="stSidebar"],
-            .main, .stApp {
-                background-color: #f8fafc !important;
-                color: #1e293b !important;
-            }
-            .app-hero .tagline { color: #64748b !important; }
-            .preset-info { color: #475569 !important; background: rgba(99,102,241,0.06) !important; }
-            .result-panel { background: rgba(16,185,129,0.06) !important; }
-            .result-panel .result-stats { color: #334155 !important; }
-            .section-title { color: #64748b !important; }
-            .footer-section { color: #94a3b8 !important; }
-            header[data-testid="stHeader"] {
-                background: rgba(248,250,252,0.94) !important;
-            }
-        </style>
-        """
-
+    # Sembunyikan sidebar toggle arrow
+    hide_sidebar = """
+    <style>
+        [data-testid="collapsedControl"] { display: none !important; }
+        section[data-testid="stSidebar"] { display: none !important; }
+    </style>
+    """
+    st.markdown(hide_sidebar, unsafe_allow_html=True)
     st.markdown(PAGE_STYLES, unsafe_allow_html=True)
-    if light_override:
-        st.markdown(light_override, unsafe_allow_html=True)
     st.markdown(
         '<div class="app-hero">'
         '<div class="brand">' + APP_TITLE + '</div>'
@@ -731,6 +697,19 @@ def render_header():
         '</div>',
         unsafe_allow_html=True,
     )
+
+
+def render_history():
+    """Tampilkan riwayat kompresi di main page."""
+    history = st.session_state.get("compression_history", [])
+    if history:
+        with st.expander("📋 Riwayat Kompresi (" + str(len(history)) + ")", expanded=False):
+            for item in reversed(history[-10:]):
+                st.caption(
+                    "**" + item["name"] + "** — "
+                    + item["original"] + " → " + item["result"]
+                    + " " + item["reduction"]
+                )
 
 
 def render_video_info(metadata):
@@ -1378,6 +1357,7 @@ def main():
             with st.container():
                 st.code(error_msg, language="text")
 
+    render_history()
     render_footer()
 
 
