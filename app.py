@@ -22,11 +22,12 @@ import json
 import time
 import uuid
 
-APP_VERSION = "6.1.0"
+APP_VERSION = "7.0.0"
 APP_TITLE = "Kompres"
 APP_TAGLINE = "Kompresi Video Profesional"
 
 SUPPORTED_FORMATS = ["mp4", "mov", "mkv", "avi", "webm"]
+OUTPUT_FORMATS = {"MP4 (H.264)": "mp4", "WebM (VP9)": "webm", "GIF Animasi": "gif"}
 FFMPEG_THREADS = 0
 SESSION_DIR = "/tmp/kompres_sessions"
 SESSION_MAX_AGE = 3600
@@ -248,14 +249,26 @@ PAGE_STYLES = """
     }
 
     div[data-testid="stFileUploader"] {
-        border: 2px dashed rgba(124, 58, 237, 0.22);
-        border-radius: 14px;
-        padding: 0.5rem;
-        transition: border-color 0.3s ease;
+        border: 2px dashed rgba(124, 58, 237, 0.35);
+        border-radius: 16px;
+        padding: 1.5rem 1rem;
+        transition: all 0.3s ease;
+        background: rgba(124, 58, 237, 0.04);
+        min-height: 120px;
     }
 
     div[data-testid="stFileUploader"]:hover {
-        border-color: rgba(124, 58, 237, 0.5);
+        border-color: rgba(124, 58, 237, 0.6);
+        background: rgba(124, 58, 237, 0.08);
+        box-shadow: 0 0 24px rgba(124, 58, 237, 0.12);
+    }
+
+    div[data-testid="stFileUploader"] section > button {
+        background: linear-gradient(135deg, #7c3aed, #a78bfa) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
     }
 
     .stButton > button {
@@ -326,9 +339,38 @@ def calculate_reduction(original, compressed):
     return ((original - compressed) / original) * 100
 
 
-def get_clean_filename(uploaded_name):
+def get_clean_filename(uploaded_name, out_format="mp4"):
     p = pathlib.Path(uploaded_name)
-    return "kompres_" + p.stem + ".mp4"
+    return "kompres_" + p.stem + "." + out_format
+
+
+def estimate_output_size(duration, crf, resolution, has_audio, out_format="mp4"):
+    """Estimasi kasar ukuran output berdasarkan parameter."""
+    res_bitrate = {"1080p": 4000, "720p": 2000, "480p": 1000, "360p": 600}
+    base_kbps = res_bitrate.get(resolution, 2500)
+    crf_factor = 2.0 ** ((28 - crf) / 6.0)
+    video_kbps = base_kbps * crf_factor
+    if out_format == "gif":
+        video_kbps = video_kbps * 3
+    elif out_format == "webm":
+        video_kbps = video_kbps * 0.85
+    audio_kbps = 96 if has_audio and out_format != "gif" else 0
+    total_kbps = video_kbps + audio_kbps
+    size_bytes = (total_kbps * duration * 1000) / 8
+    return max(int(size_bytes), 0)
+
+
+def calculate_target_bitrate(target_mb, duration, has_audio):
+    """Hitung bitrate video untuk mencapai target ukuran file."""
+    if duration <= 0:
+        return None
+    target_bits = target_mb * 8 * 1024 * 1024
+    audio_bits = 96 * 1000 * duration if has_audio else 0
+    video_bits = target_bits - audio_bits
+    if video_bits <= 0:
+        return None
+    video_kbps = int(video_bits / duration / 1000)
+    return str(video_kbps) + "k"
 
 
 def extract_frame(video_path, timestamp=1.0):
@@ -410,6 +452,7 @@ def compress_video(
     max_bitrate=None,
     progress_callback=None,
     duration_seconds=0,
+    out_format="mp4",
 ):
     try:
         input_args = {}
@@ -442,26 +485,64 @@ def compress_video(
         if target_fps:
             video = ffmpeg.filter(video, "fps", fps=target_fps)
 
-        encoding_params = {
-            "vcodec": "libx264",
-            "crf": crf,
-            "preset": preset,
-            "movflags": "+faststart",
-            "profile:v": "high",
-            "tune": "film",
-            "threads": FFMPEG_THREADS,
-        }
-        encoding_params.update(COLOR_PROFILE)
+        # --- GIF output ---
+        if out_format == "gif":
+            if not target_fps:
+                video = ffmpeg.filter(video, "fps", fps=15)
+            palette_path = output_path + "_palette.png"
+            _temp_files.append(palette_path)
+            palette_gen = ffmpeg.output(video, palette_path, vf="palettegen=stats_mode=diff", an=None)
+            ffmpeg.run(palette_gen, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+            source2 = ffmpeg.input(input_path, **input_args)
+            vid2 = source2.video
+            if resolution in RESOLUTION_MAP:
+                vid2 = ffmpeg.filter(vid2, "scale", "trunc(oh*a/2)*2", RESOLUTION_MAP[resolution])
+            if target_fps:
+                vid2 = ffmpeg.filter(vid2, "fps", fps=target_fps)
+            else:
+                vid2 = ffmpeg.filter(vid2, "fps", fps=15)
+            palette_in = ffmpeg.input(palette_path)
+            gif_out = ffmpeg.filter([vid2, palette_in], "paletteuse", dither="bayer", bayer_scale=3)
+            output = ffmpeg.output(gif_out, output_path, an=None, loop=0)
+            ffmpeg.run(output, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+            return True, None
 
-        if max_bitrate:
-            encoding_params["maxrate"] = max_bitrate
-            encoding_params["bufsize"] = max_bitrate
-
-        if mute_audio:
-            output = ffmpeg.output(video, output_path, an=None, **encoding_params)
+        # --- WebM VP9 output ---
+        if out_format == "webm":
+            encoding_params = {
+                "vcodec": "libvpx-vp9",
+                "crf": crf,
+                "b:v": "0",
+                "threads": FFMPEG_THREADS,
+                "row-mt": 1,
+            }
+            if max_bitrate:
+                encoding_params["b:v"] = max_bitrate
+            if mute_audio:
+                output = ffmpeg.output(video, output_path, an=None, **encoding_params)
+            else:
+                audio_params = {"c:a": "libopus", "b:a": "96k", "ac": 2}
+                output = ffmpeg.output(audio, video, output_path, **audio_params, **encoding_params)
         else:
-            audio_params = {"c:a": "aac", "b:a": "96k", "ac": 2}
-            output = ffmpeg.output(audio, video, output_path, **audio_params, **encoding_params)
+            # --- MP4 H.264 output ---
+            encoding_params = {
+                "vcodec": "libx264",
+                "crf": crf,
+                "preset": preset,
+                "movflags": "+faststart",
+                "profile:v": "high",
+                "tune": "film",
+                "threads": FFMPEG_THREADS,
+            }
+            encoding_params.update(COLOR_PROFILE)
+            if max_bitrate:
+                encoding_params["maxrate"] = max_bitrate
+                encoding_params["bufsize"] = max_bitrate
+            if mute_audio:
+                output = ffmpeg.output(video, output_path, an=None, **encoding_params)
+            else:
+                audio_params = {"c:a": "aac", "b:a": "96k", "ac": 2}
+                output = ffmpeg.output(audio, video, output_path, **audio_params, **encoding_params)
 
         cmd = ffmpeg.compile(output, overwrite_output=True)
 
@@ -470,7 +551,9 @@ def compress_video(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
             )
             pattern = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+            speed_pattern = re.compile(r"speed=\s*([0-9.]+)x")
             stderr_lines = []
+            start_time = time.time()
 
             if process.stderr is not None:
                 for line in iter(process.stderr.readline, ""):
@@ -482,7 +565,14 @@ def compress_video(
                         s = float(match.group(3))
                         elapsed = h * 3600 + m * 60 + s
                         pct = min(elapsed / duration_seconds, 1.0)
-                        progress_callback(pct)
+                        wall = time.time() - start_time
+                        speed_m = speed_pattern.search(line)
+                        speed_txt = speed_m.group(1) + "x" if speed_m else ""
+                        eta = ""
+                        if pct > 0.01 and wall > 2:
+                            remaining = (wall / pct) * (1 - pct)
+                            eta = format_duration(remaining)
+                        progress_callback(pct, speed_txt, eta)
 
             process.wait()
             if process.returncode != 0:
@@ -590,7 +680,49 @@ def load_file_bytes(file_path):
 
 
 def render_header():
+    # --- Dark/Light Mode ---
+    with st.sidebar:
+        st.markdown("### ⚙️ Pengaturan")
+        theme = st.radio("Tema", ["🌙 Dark", "☀️ Light"], index=0, horizontal=True)
+        is_light = theme == "☀️ Light"
+
+        # --- Riwayat Kompresi ---
+        st.markdown("### 📋 Riwayat Kompresi")
+        history = st.session_state.get("compression_history", [])
+        if history:
+            for item in reversed(history[-10:]):
+                st.caption(
+                    "**" + item["name"] + "**\n"
+                    + item["original"] + " → " + item["result"]
+                    + " (" + item["reduction"] + ")"
+                )
+        else:
+            st.caption("Belum ada riwayat kompresi.")
+
+    light_override = ""
+    if is_light:
+        light_override = """
+        <style>
+            section[data-testid="stSidebar"],
+            .main, .stApp {
+                background-color: #f8fafc !important;
+                color: #1e293b !important;
+            }
+            .app-hero .tagline { color: #64748b !important; }
+            .preset-info { color: #475569 !important; background: rgba(99,102,241,0.06) !important; }
+            .result-panel { background: rgba(16,185,129,0.06) !important; }
+            .result-panel .result-stats { color: #334155 !important; }
+            .section-title { color: #64748b !important; }
+            .footer-section { color: #94a3b8 !important; }
+            header[data-testid="stHeader"] {
+                background: rgba(248,250,252,0.94) !important;
+            }
+        </style>
+        """
+
     st.markdown(PAGE_STYLES, unsafe_allow_html=True)
+    if light_override:
+        st.markdown(light_override, unsafe_allow_html=True)
     st.markdown(
         '<div class="app-hero">'
         '<div class="brand">' + APP_TITLE + '</div>'
@@ -637,7 +769,23 @@ def render_compression_controls(preset, video_metadata):
 
     st.markdown('<div class="section-title">Kompresi dan Kualitas</div>', unsafe_allow_html=True)
 
-    if is_custom:
+    # --- Format Output ---
+    fmt_label = st.selectbox("Format Output", list(OUTPUT_FORMATS.keys()), index=0)
+    settings["out_format"] = OUTPUT_FORMATS[fmt_label]
+
+    # --- Smart Compression ---
+    smart_mode = st.checkbox("Smart Compression (target ukuran file)", value=False)
+    if smart_mode:
+        target_mb = st.number_input(
+            "Target ukuran (MB)",
+            min_value=0.5, max_value=500.0, value=10.0, step=0.5,
+            help="Masukkan target ukuran file hasil. Bitrate akan dihitung otomatis.",
+        )
+        settings["smart_target_mb"] = target_mb
+    else:
+        settings["smart_target_mb"] = None
+
+    if is_custom and not smart_mode:
         settings["crf"] = st.slider(
             "Level Kompresi (CRF)",
             min_value=18,
@@ -657,7 +805,7 @@ def render_compression_controls(preset, video_metadata):
             res_index = list(RESOLUTION_MAP.keys()).index(preset["resolution"]) + 1
         selected_res = st.selectbox("Resolusi Output", res_options, index=res_index)
         settings["resolution"] = "original" if selected_res == "Resolusi Asli" else selected_res
-    else:
+    elif not smart_mode:
         settings["crf"] = preset["crf"]
         settings["preset"] = preset["preset"]
         settings["resolution"] = preset["resolution"]
@@ -665,8 +813,23 @@ def render_compression_controls(preset, video_metadata):
             "CRF: " + str(preset["crf"]) + " | Preset: " + preset["preset"]
             + " | Resolusi: " + preset["resolution"]
         )
+    else:
+        settings["crf"] = 28
+        settings["preset"] = "medium"
+        settings["resolution"] = preset.get("resolution", "720p")
 
     settings["mute_audio"] = st.checkbox("Nonaktifkan Audio")
+
+    # --- Estimasi Ukuran ---
+    if video_metadata and not smart_mode:
+        duration = video_metadata.get("duration", 0)
+        has_audio = video_metadata.get("has_audio", False) and not settings["mute_audio"]
+        if duration > 0:
+            est = estimate_output_size(
+                duration, settings["crf"], settings["resolution"],
+                has_audio, settings["out_format"],
+            )
+            st.caption("Estimasi ukuran hasil: **" + format_filesize(est) + "**")
 
     return settings
 
@@ -915,9 +1078,19 @@ body { background: transparent; overflow: hidden; font-family: 'Inter', sans-ser
     components.html(html_final, height=500, scrolling=False)
 
 
-def render_before_after(input_path, output_path, original_size, uploaded_name, video_metadata):
+def render_before_after(input_path, output_path, original_size, uploaded_name, video_metadata, out_format="mp4"):
     compressed_size = os.path.getsize(output_path)
     reduction = calculate_reduction(original_size, compressed_size)
+
+    # Simpan ke riwayat
+    history = st.session_state.get("compression_history", [])
+    history.append({
+        "name": uploaded_name,
+        "original": format_filesize(original_size),
+        "result": format_filesize(compressed_size),
+        "reduction": f"-{reduction:.1f}%",
+    })
+    st.session_state["compression_history"] = history
 
     st.markdown(
         '<div class="result-panel">'
@@ -933,44 +1106,49 @@ def render_before_after(input_path, output_path, original_size, uploaded_name, v
     )
 
     duration = video_metadata.get("duration", 0) if video_metadata else 0
-    render_comparison_slider(input_path, output_path, duration)
+    if out_format != "gif":
+        render_comparison_slider(input_path, output_path, duration)
 
     st.markdown('<div class="section-title">Ukuran File</div>', unsafe_allow_html=True)
     col_s1, col_s2 = st.columns(2)
     col_s1.metric("Asli", format_filesize(original_size))
     col_s2.metric("Hasil", format_filesize(compressed_size), delta="-" + f"{reduction:.1f}" + "%", delta_color="normal")
 
-    output_meta = probe_video(output_path)
-    if video_metadata and output_meta:
-        st.markdown('<div class="section-title">Detail Teknis</div>', unsafe_allow_html=True)
-        col_h1, col_h2, col_h3 = st.columns(3)
-        col_h1.write("**Parameter**")
-        col_h2.write("**Asli**")
-        col_h3.write("**Hasil**")
-
-        params = [
-            ("Resolusi", video_metadata.get("resolution_text", "-"), output_meta.get("resolution_text", "-")),
-            ("Codec", video_metadata.get("codec", "-"), output_meta.get("codec", "-")),
-            ("FPS", str(video_metadata.get("fps", "-")), str(output_meta.get("fps", "-"))),
-            ("Bitrate", video_metadata.get("bitrate_text", "-"), output_meta.get("bitrate_text", "-")),
-        ]
-        for label, val_before, val_after in params:
-            c1, c2, c3 = st.columns(3)
-            c1.write(label)
-            c2.write(val_before)
-            c3.write(val_after)
+    if out_format != "gif":
+        output_meta = probe_video(output_path)
+        if video_metadata and output_meta:
+            st.markdown('<div class="section-title">Detail Teknis</div>', unsafe_allow_html=True)
+            col_h1, col_h2, col_h3 = st.columns(3)
+            col_h1.write("**Parameter**")
+            col_h2.write("**Asli**")
+            col_h3.write("**Hasil**")
+            params = [
+                ("Resolusi", video_metadata.get("resolution_text", "-"), output_meta.get("resolution_text", "-")),
+                ("Codec", video_metadata.get("codec", "-"), output_meta.get("codec", "-")),
+                ("FPS", str(video_metadata.get("fps", "-")), str(output_meta.get("fps", "-"))),
+                ("Bitrate", video_metadata.get("bitrate_text", "-"), output_meta.get("bitrate_text", "-")),
+            ]
+            for label, val_before, val_after in params:
+                c1, c2, c3 = st.columns(3)
+                c1.write(label)
+                c2.write(val_before)
+                c3.write(val_after)
 
     st.write("")
 
-    st.video(output_path)
+    if out_format == "gif":
+        st.image(output_path, caption="Hasil GIF")
+    else:
+        st.video(output_path)
 
-    download_name = get_clean_filename(uploaded_name)
+    mime_map = {"mp4": "video/mp4", "webm": "video/webm", "gif": "image/gif"}
+    download_name = get_clean_filename(uploaded_name, out_format)
     file_data = load_file_bytes(output_path)
     st.download_button(
-        label="Download Hasil Kompresi",
+        label="Download Hasil",
         data=file_data,
         file_name=download_name,
-        mime="video/mp4",
+        mime=mime_map.get(out_format, "video/mp4"),
     )
 
 
@@ -1112,7 +1290,8 @@ def main():
     st.write("")
 
     if st.button("Mulai Kompresi", use_container_width=True):
-        output_path = input_path + "_out.mp4"
+        out_fmt = settings.get("out_format", "mp4")
+        output_path = input_path + "_out." + out_fmt
         _temp_files.append(output_path)
 
         if video_metadata is None:
@@ -1128,13 +1307,32 @@ def main():
                 end = advanced.get("trim_end") or total_duration
                 total_duration = max(end - start, 0)
 
-        progress_bar = st.progress(0, text="Mempersiapkan encoding...")
+        # Smart compression: hitung bitrate dari target ukuran
+        effective_max_bitrate = advanced.get("max_bitrate")
+        if settings.get("smart_target_mb") and total_duration > 0:
+            has_audio = video_metadata.get("has_audio", False) if video_metadata else False
+            smart_br = calculate_target_bitrate(
+                settings["smart_target_mb"], total_duration,
+                has_audio and not settings["mute_audio"],
+            )
+            if smart_br:
+                effective_max_bitrate = smart_br
 
-        def on_progress(pct):
+        progress_bar = st.progress(0, text="Mempersiapkan encoding...")
+        status_text = st.empty()
+
+        def on_progress(pct, speed="", eta=""):
             progress_bar.progress(
                 min(int(pct * 100), 99),
                 text="Encoding: " + str(int(pct * 100)) + "%",
             )
+            info_parts = []
+            if speed:
+                info_parts.append("Kecepatan: " + speed)
+            if eta:
+                info_parts.append("Sisa: ~" + eta)
+            if info_parts:
+                status_text.caption(" · ".join(info_parts))
 
         success, error_msg = compress_video(
             input_path=input_path,
@@ -1147,16 +1345,19 @@ def main():
             trim_end=advanced.get("trim_end"),
             target_fps=advanced.get("target_fps"),
             aspect_ratio=advanced.get("aspect_ratio"),
-            max_bitrate=advanced.get("max_bitrate"),
+            max_bitrate=effective_max_bitrate,
             progress_callback=on_progress,
             duration_seconds=total_duration,
+            out_format=out_fmt,
         )
 
         if success:
             progress_bar.progress(100, text="Selesai!")
-            render_before_after(input_path, output_path, original_size, uploaded_name, video_metadata)
+            status_text.empty()
+            render_before_after(input_path, output_path, original_size, uploaded_name, video_metadata, out_fmt)
         else:
             progress_bar.empty()
+            status_text.empty()
             st.error("Terjadi kesalahan saat memproses video.")
             with st.container():
                 st.code(error_msg, language="text")
